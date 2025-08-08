@@ -1,4 +1,7 @@
 import pandas as pd
+import os
+import json
+import numpy as np
 
 def clean(df):
 
@@ -61,3 +64,102 @@ def calculate_rhr(df: pd.DataFrame) -> float:
     rhr = rolling_mean.min()
 
     return round(rhr, 1) if rhr is not None else None
+
+
+
+def extract_garmin_daily_data(folder_path):
+    health_data = []
+    stress_data = []
+
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith('.json'):
+                file_path = os.path.join(root, file)
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = json.load(f)
+
+                        # handle JSON arrays or objects
+                        if isinstance(content, list):
+                            records = content
+                        else:
+                            records = [content]
+
+                        for entry in records:
+                            # --- Extract General Health Summary ---
+                            if "calendarDate" in entry:
+                                row = {
+                                    "calendarDate": entry.get("calendarDate"),
+                                    "totalKilocalories": entry.get("totalKilocalories"),
+                                    "activeKilocalories": entry.get("activeKilocalories"),
+                                    "bmrKilocalories": entry.get("bmrKilocalories"),
+                                    "totalSteps": entry.get("totalSteps"),
+                                    "dailyStepGoal": entry.get("dailyStepGoal"),
+                                    "totalDistanceMeters": entry.get("totalDistanceMeters"),
+                                    "minAvgHeartRate": entry.get("minAvgHeartRate"),
+                                    "maxAvgHeartRate": entry.get("maxAvgHeartRate"),
+                                    "minHeartRate": entry.get("minHeartRate"),
+                                    "maxHeartRate": entry.get("maxHeartRate"),
+                                    "restingHeartRate": entry.get("restingHeartRate"),
+                                    "currentDayRestingHeartRate": entry.get("currentDayRestingHeartRate"),
+                                    "highlyActiveSeconds": entry.get("highlyActiveSeconds"),
+                                    "activeSeconds": entry.get("activeSeconds"),
+                                    "moderateIntensityMinutes": entry.get("moderateIntensityMinutes"),
+                                    "vigorousIntensityMinutes": entry.get("vigorousIntensityMinutes"),
+                                    "userIntensityMinutesGoal": entry.get("userIntensityMinutesGoal"),
+                                    "userFloorsAscendedGoal": entry.get("userFloorsAscendedGoal"),
+                                }
+                                health_data.append(row)
+
+                            # --- Extract Stress Summary if present ---
+                            if "allDayStress" in entry:
+                                stress_entry = entry["allDayStress"]
+                                calendar_date = stress_entry.get("calendarDate")
+                                for agg in stress_entry.get("aggregatorList", []):
+                                    if agg.get("type") == "TOTAL":
+                                        stress_data.append({
+                                            "calendarDate": calendar_date,
+                                            "averageStressLevel": agg.get("averageStressLevel"),
+                                            "averageStressLevelIntensity": agg.get("averageStressLevelIntensity"),
+                                            "maxStressLevel": agg.get("maxStressLevel")
+                                        })
+
+                except (json.JSONDecodeError, UnicodeDecodeError, FileNotFoundError):
+                    continue
+
+    # Convert to DataFrames
+    df_health = pd.DataFrame(health_data)
+    df_stress = pd.DataFrame(stress_data)
+
+    # Merge on calendarDate
+    if not df_health.empty:
+        df_health["calendarDate"] = pd.to_datetime(df_health["calendarDate"], errors='coerce')
+    if not df_stress.empty:
+        df_stress["calendarDate"] = pd.to_datetime(df_stress["calendarDate"], errors='coerce')
+
+    df = pd.merge(df_health, df_stress, on="calendarDate", how="outer").sort_values("calendarDate").reset_index(drop=True)
+
+    return df
+
+
+# def rolling_outliers_zscore(series, window=14, threshold=1):
+#     rolling_mean = series.rolling(window=window, center=True).mean()
+#     rolling_std = series.rolling(window=window, center=True).std()
+#     z_scores = (series - rolling_mean) / rolling_std
+#     return np.abs(z_scores) > threshold
+
+
+def rolling_outliers_zscore(series, window=14, threshold=2, debug=False):
+    rolling_mean = series.rolling(window=window, center=True).mean()
+    rolling_std = series.rolling(window=window, center=True).std()
+    rolling_std = rolling_std.replace(0, np.nan)  # Prevent div by 0
+
+    z_scores = (series - rolling_mean) / rolling_std
+    outliers = np.abs(z_scores) > threshold
+
+    if debug:
+        print(f"Total outliers found: {outliers.sum()}")
+        print(outliers.value_counts(dropna=False))
+
+    return outliers, z_scores
